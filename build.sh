@@ -1,31 +1,59 @@
 #!/usr/bin/env bash
 set -ex
 
-unameOut="$(uname -s)"
-case "${unameOut}" in
-    Darwin*)
-        EXE_SUFFIX=
-        if [[ "$(uname -m)" == "arm64" ]] || [[ "$(uname -m)" == "aarch64" ]]; then
-            HOST_TRIPLE=aarch64-apple-darwin
+TARGET_TRIPLE=${TARGET_TRIPLE:-}
+
+if [[ -z "${TARGET_TRIPLE}" ]]; then
+    # If `TARGET_TRIPLE` is not defined, build for the host system.
+    unameOut="$(uname -s)"
+    case "${unameOut}" in
+        Darwin*)
+            EXE_SUFFIX=
+            if [[ "$(uname -m)" == "arm64" ]] || [[ "$(uname -m)" == "aarch64" ]]; then
+                TARGET_TRIPLE=aarch64-apple-darwin
+                ARTIFACT=platform-tools-osx-aarch64.tar.bz2
+            else
+                TARGET_TRIPLE=x86_64-apple-darwin
+                ARTIFACT=platform-tools-osx-x86_64.tar.bz2
+            fi;;
+        MINGW*)
+            EXE_SUFFIX=.exe
+            TARGET_TRIPLE=x86_64-pc-windows-msvc
+            ARTIFACT=platform-tools-windows-x86_64.tar.bz2;;
+        Linux* | *)
+            EXE_SUFFIX=
+            if [[ "$(uname -m)" == "arm64" ]] || [[ "$(uname -m)" == "aarch64" ]]; then
+                TARGET_TRIPLE=aarch64-unknown-linux-gnu
+                ARTIFACT=platform-tools-linux-aarch64.tar.bz2
+            else
+                TARGET_TRIPLE=x86_64-unknown-linux-gnu
+                ARTIFACT=platform-tools-linux-x86_64.tar.bz2
+            fi
+    esac
+else
+    # If `TARGET_TRIPLE` is defined, cross-compile.
+    case "${TARGET_TRIPLE}" in
+        aarch64-apple-darwin)
+            EXE_SUFFIX=
             ARTIFACT=platform-tools-osx-aarch64.tar.bz2
-        else
-            HOST_TRIPLE=x86_64-apple-darwin
-            ARTIFACT=platform-tools-osx-x86_64.tar.bz2
-        fi;;
-    MINGW*)
-        EXE_SUFFIX=.exe
-        HOST_TRIPLE=x86_64-pc-windows-msvc
-        ARTIFACT=platform-tools-windows-x86_64.tar.bz2;;
-    Linux* | *)
-        EXE_SUFFIX=
-        if [[ "$(uname -m)" == "arm64" ]] || [[ "$(uname -m)" == "aarch64" ]]; then
-            HOST_TRIPLE=aarch64-unknown-linux-gnu
+            ;;
+        aarch64*linux*)
+            EXE_SUFFIX=
             ARTIFACT=platform-tools-linux-aarch64.tar.bz2
-        else
-            HOST_TRIPLE=x86_64-unknown-linux-gnu
+            ;;
+        x86_64-apple-darwin)
+            EXE_SUFFIX=
+            ARTIFACT=platform-tools-osx-x86_64.tar.bz2
+            ;;
+        x86_64*windows*)
+            EXE_SUFFIX=.exe
+            ARTIFACT=platform-tools-windows-x86_64.tar.bz2
+            ;;
+        x86_64*linux*)
+            EXE_SUFFIX=
             ARTIFACT=platform-tools-linux-x86_64.tar.bz2
-        fi
-esac
+    esac
+fi
 
 cd "$(dirname "$0")"
 OUT_DIR=$(realpath "${1:-out}")
@@ -34,38 +62,40 @@ rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
 pushd "${OUT_DIR}"
 
-git clone --single-branch --branch solana-tools-v1.40 --recurse-submodules --shallow-submodules https://github.com/solana-labs/rust.git
+git clone --single-branch --branch solana-tools-v1.40-cross --recurse-submodules --shallow-submodules https://github.com/vadorovsky/rust.git
 echo "$( cd rust && git rev-parse HEAD )  https://github.com/solana-labs/rust.git" >> version.md
 
 git clone --single-branch --branch solana-tools-v1.40 https://github.com/solana-labs/cargo.git
 echo "$( cd cargo && git rev-parse HEAD )  https://github.com/solana-labs/cargo.git" >> version.md
 
 pushd rust
-if [[ "${HOST_TRIPLE}" == "x86_64-pc-windows-msvc" ]] ; then
+if [[ "${TARGET_TRIPLE}" == "x86_64-pc-windows-msvc" ]] ; then
     # Do not build lldb on Windows
     sed -i -e 's#enable-projects = \"clang;lld;lldb\"#enable-projects = \"clang;lld\"#g' config.toml
 fi
+sed -i -e "s|#target =*$|target = [\"${TARGET_TRIPLE}\"]|g" config.toml
+cat config.toml
 ./build.sh
 popd
 
 pushd cargo
-if [[ "${HOST_TRIPLE}" == "x86_64-unknown-linux-gnu" ]] ; then
+if [[ "${TARGET_TRIPLE}" == "x86_64-unknown-linux-gnu" ]] ; then
     OPENSSL_STATIC=1 OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo build --release
 else
     OPENSSL_STATIC=1 cargo build --release
 fi
 popd
 
-if [[ "${HOST_TRIPLE}" != "x86_64-pc-windows-msvc" ]] ; then
+if [[ "${TARGET_TRIPLE}" != "x86_64-pc-windows-msvc" ]] ; then
     git clone --single-branch --branch solana-tools-v1.40 https://github.com/solana-labs/newlib.git
     echo "$( cd newlib && git rev-parse HEAD )  https://github.com/solana-labs/newlib.git" >> version.md
     mkdir -p newlib_build
     mkdir -p newlib_install
     pushd newlib_build
-    CC="${OUT_DIR}/rust/build/${HOST_TRIPLE}/llvm/bin/clang" \
-      AR="${OUT_DIR}/rust/build/${HOST_TRIPLE}/llvm/bin/llvm-ar" \
-      RANLIB="${OUT_DIR}/rust/build/${HOST_TRIPLE}/llvm/bin/llvm-ranlib" \
-      ../newlib/newlib/configure --target=sbf-solana-solana --host=sbf-solana --build="${HOST_TRIPLE}" --prefix="${OUT_DIR}/newlib_install"
+    CC="${OUT_DIR}/rust/build/${TARGET_TRIPLE}/llvm/bin/clang" \
+      AR="${OUT_DIR}/rust/build/${TARGET_TRIPLE}/llvm/bin/llvm-ar" \
+      RANLIB="${OUT_DIR}/rust/build/${TARGET_TRIPLE}/llvm/bin/llvm-ranlib" \
+      ../newlib/newlib/configure --target=sbf-solana-solana --host=sbf-solana --build="${TARGET_TRIPLE}" --prefix="${OUT_DIR}/newlib_install"
     make install
     popd
 fi
@@ -73,21 +103,21 @@ fi
 # Copy rust build products
 mkdir -p deploy/rust
 cp version.md deploy/
-cp -R "rust/build/${HOST_TRIPLE}/stage1/bin" deploy/rust/
+cp -R "rust/build/${TARGET_TRIPLE}/stage1/bin" deploy/rust/
 cp -R "cargo/target/release/cargo${EXE_SUFFIX}" deploy/rust/bin/
 mkdir -p deploy/rust/lib/rustlib/
-cp -R "rust/build/${HOST_TRIPLE}/stage1/lib/rustlib/${HOST_TRIPLE}" deploy/rust/lib/rustlib/
-cp -R "rust/build/${HOST_TRIPLE}/stage1/lib/rustlib/sbf-solana-solana" deploy/rust/lib/rustlib/
-find . -maxdepth 6 -type f -path "./rust/build/${HOST_TRIPLE}/stage1/lib/*" -exec cp {} deploy/rust/lib \;
+cp -R "rust/build/${TARGET_TRIPLE}/stage1/lib/rustlib/${TARGET_TRIPLE}" deploy/rust/lib/rustlib/
+cp -R "rust/build/${TARGET_TRIPLE}/stage1/lib/rustlib/sbf-solana-solana" deploy/rust/lib/rustlib/
+find . -maxdepth 6 -type f -path "./rust/build/${TARGET_TRIPLE}/stage1/lib/*" -exec cp {} deploy/rust/lib \;
 mkdir -p deploy/rust/lib/rustlib/src/rust
-cp "rust/build/${HOST_TRIPLE}/stage1/lib/rustlib/src/rust/Cargo.lock" deploy/rust/lib/rustlib/src/rust
-cp -R "rust/build/${HOST_TRIPLE}/stage1/lib/rustlib/src/rust/library" deploy/rust/lib/rustlib/src/rust
+cp "rust/build/${TARGET_TRIPLE}/stage1/lib/rustlib/src/rust/Cargo.lock" deploy/rust/lib/rustlib/src/rust
+cp -R "rust/build/${TARGET_TRIPLE}/stage1/lib/rustlib/src/rust/library" deploy/rust/lib/rustlib/src/rust
 
 # Copy llvm build products
 mkdir -p deploy/llvm/{bin,lib}
 while IFS= read -r f
 do
-    bin_file="rust/build/${HOST_TRIPLE}/llvm/build/bin/${f}${EXE_SUFFIX}"
+    bin_file="rust/build/${TARGET_TRIPLE}/llvm/build/bin/${f}${EXE_SUFFIX}"
     if [[ -f "$bin_file" ]] ; then
         cp -R "$bin_file" deploy/llvm/bin/
     fi
@@ -111,13 +141,13 @@ llvm-readelf
 llvm-readobj
 EOF
          )
-cp -R "rust/build/${HOST_TRIPLE}/llvm/build/lib/clang" deploy/llvm/lib/
-if [[ "${HOST_TRIPLE}" != "x86_64-pc-windows-msvc" ]] ; then
+cp -R "rust/build/${TARGET_TRIPLE}/llvm/build/lib/clang" deploy/llvm/lib/
+if [[ "${TARGET_TRIPLE}" != "x86_64-pc-windows-msvc" ]] ; then
     cp -R newlib_install/sbf-solana/lib/lib{c,m}.a deploy/llvm/lib/
     cp -R newlib_install/sbf-solana/include deploy/llvm/
     cp -R rust/src/llvm-project/lldb/scripts/solana/* deploy/llvm/bin/
-    cp -R rust/build/${HOST_TRIPLE}/llvm/lib/liblldb.* deploy/llvm/lib/
-    cp -R rust/build/${HOST_TRIPLE}/llvm/lib/python* deploy/llvm/lib/
+    cp -R rust/build/${TARGET_TRIPLE}/llvm/lib/liblldb.* deploy/llvm/lib/
+    cp -R rust/build/${TARGET_TRIPLE}/llvm/lib/python* deploy/llvm/lib/
 fi
 
 # Check the Rust binaries
@@ -159,10 +189,10 @@ rm -rf deploy
 # Package LLVM binaries for Move project
 MOVE_DEV_TAR=${ARTIFACT/platform-tools/move-dev}
 mkdir move-dev
-if [[ "${HOST_TRIPLE}" == "x86_64-pc-windows-msvc" ]] ; then
-    rm -f rust/build/${HOST_TRIPLE}/llvm/bin/{llvm-ranlib.exe,llvm-lib.exe,llvm-dlltool.exe}
+if [[ "${TARGET_TRIPLE}" == "x86_64-pc-windows-msvc" ]] ; then
+    rm -f rust/build/${TARGET_TRIPLE}/llvm/bin/{llvm-ranlib.exe,llvm-lib.exe,llvm-dlltool.exe}
 fi
-mv "rust/build/${HOST_TRIPLE}/llvm/"{bin,include,lib} move-dev/
+mv "rust/build/${TARGET_TRIPLE}/llvm/"{bin,include,lib} move-dev/
 tar -jcf "${MOVE_DEV_TAR}" move-dev
 
 popd
